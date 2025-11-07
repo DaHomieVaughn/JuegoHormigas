@@ -1,5 +1,6 @@
 import pygame
 import sys
+import os
 import math
 import random
 import time
@@ -7,7 +8,23 @@ from utils.algoritmo_hormigas import AlgoritmoHormigas
 
 # --- INICIALIZACIÓN ---
 pygame.init()
-pygame.mixer.init()  # inicializamos el mixer de sonido
+# intenta inicializar mixer, si falla seguimos sin sonido
+try:
+    pygame.mixer.init()
+except Exception:
+    print("Aviso: pygame.mixer no pudo inicializarse (sin sonido).")
+
+# --- HELP: cargar rutas compatibles con PyInstaller ---
+def cargar_ruta(ruta_relativa):
+    """
+    Devuelve la ruta absoluta correcta tanto si se ejecuta como script (.py)
+    como si está empaquetado con PyInstaller (--onefile).
+    """
+    try:
+        base_path = sys._MEIPASS  # pyinstaller temporal folder
+    except Exception:
+        base_path = os.path.dirname(os.path.abspath(__file__))
+    return os.path.join(base_path, ruta_relativa)
 
 # --- CONFIGURACIÓN ---
 ANCHO, ALTO = 800, 600
@@ -30,12 +47,38 @@ BLANCO = (255, 255, 255)
 MINI_BG = (30, 30, 30)
 MINI_FRAME = (10, 10, 10)
 
-# --- SONIDOS ---
-sonido_entrega = pygame.mixer.Sound("assets/sonidos/entrega.mp3")
-musica_fondo = "assets/sonidos/bgmusic.mp3"
-pygame.mixer.music.load(musica_fondo)
-pygame.mixer.music.set_volume(0.5)
-pygame.mixer.music.play(-1)  # música de fondo en bucle
+# --- SONIDOS (carga segura, con try/except) ---
+sonido_entrega = None
+try:
+    sonido_entrega = pygame.mixer.Sound(cargar_ruta("assets/sonidos/entrega.mp3"))
+except Exception:
+    print("No se encontró o no se pudo cargar 'assets/sonidos/entrega.mp3' (continuando sin sonido de entrega)")
+
+try:
+    musica_fondo = cargar_ruta("assets/sonidos/bgmusic.mp3")
+    pygame.mixer.music.load(musica_fondo)
+    pygame.mixer.music.set_volume(0.5)
+    pygame.mixer.music.play(-1)
+except Exception:
+    print("No se encontró o no se pudo cargar 'assets/sonidos/bgmusic.mp3' (continuando sin música de fondo)")
+
+# --- CARGA DE SPRITES (pizzero y pizza) ---
+pizzero_img = None
+pizza_img = None
+try:
+    img_path = cargar_ruta("assets/sprites/pizzero.png")
+    pizzero_img_raw = pygame.image.load(img_path).convert_alpha()
+    # escalamos a un tamaño razonable (32x32) manteniendo aspecto
+    pizzero_img = pygame.transform.smoothscale(pizzero_img_raw, (32, 32))
+except Exception:
+    print("Aviso: no se encontró 'assets/sprites/pizzero.png' — usando dibujo por defecto para repartidor")
+
+try:
+    img_path = cargar_ruta("assets/sprites/pizza.png")
+    pizza_img_raw = pygame.image.load(img_path).convert_alpha()
+    pizza_img = pygame.transform.smoothscale(pizza_img_raw, (16, 16))
+except Exception:
+    print("Aviso: no se encontró 'assets/sprites/pizza.png' — usando indicador por defecto para pizza")
 
 # --- CLASES ---
 class Repartidor:
@@ -66,11 +109,25 @@ class Repartidor:
         self.rect.topleft = (self.x - 10, self.y - 10)
 
     def dibujar(self, pantalla, cam_x, cam_y):
-        pygame.draw.ellipse(pantalla, (15,15,15), (self.x - 8 - cam_x, self.y - 6 - cam_y, 24, 8))
-        pygame.draw.rect(pantalla, ROJO, (self.x - 10 - cam_x, self.y - 10 - cam_y, 20, 20))
-        pygame.draw.rect(pantalla, (180, 30, 30), (self.x + 4 - cam_x, self.y - 4 - cam_y, 6, 6))
+        # Si tenemos imagen de pizzero, la mostramos centrada; si no, fallback al dibujo anterior
+        if pizzero_img:
+            w, h = pizzero_img.get_width(), pizzero_img.get_height()
+            pantalla.blit(pizzero_img, (self.x - w//2 - cam_x, self.y - h//2 - cam_y))
+        else:
+            # sombra
+            pygame.draw.ellipse(pantalla, (15,15,15), (self.x - 8 - cam_x, self.y - 6 - cam_y, 24, 8))
+            pygame.draw.rect(pantalla, ROJO, (self.x - 10 - cam_x, self.y - 10 - cam_y, 20, 20))
+            pygame.draw.rect(pantalla, (180, 30, 30), (self.x + 4 - cam_x, self.y - 4 - cam_y, 6, 6))
+
+        # Indicador visual de pizza: si existe pizza_img lo usamos, si no fallback al cuadrado blanco
         if self.tiene_pizza:
-            pygame.draw.rect(pantalla, BLANCO, (self.x - 5 - cam_x, self.y - 25 - cam_y, 10, 10))
+            if pizza_img:
+                pw, ph = pizza_img.get_width(), pizza_img.get_height()
+                pantalla.blit(pizza_img, (self.x - pw//2 - cam_x, self.y - h//2 - 6 - cam_y))
+            else:
+                # cuadrado blanco por defecto
+                pantalla.blit(pygame.Surface((10,10)), (self.x - 5 - cam_x, self.y - 25 - cam_y))
+                pygame.draw.rect(pantalla, BLANCO, (self.x - 5 - cam_x, self.y - 25 - cam_y, 10, 10))
 
 class Casa:
     def __init__(self, x, y, id_casa):
@@ -118,29 +175,77 @@ repartidor = Repartidor(pizzeria.x, pizzeria.y)
 colisiones = []
 
 def dibujar_fondo(pantalla, cam_x, cam_y, colisiones):
-    pantalla.fill(GRIS_OSCURO)
+    pantalla.fill((200, 200, 200))  # color base de fondo (beige claro o cemento)
     colisiones.clear()
+
+    # --- Dibujar parques (zonas verdes) ---
+    random.seed(1)  # fijo para consistencia
+    for _ in range(15):
+        px = random.randint(0, MAPA_ANCHO - 300)
+        py = random.randint(0, MAPA_ALTO - 300)
+        w = random.randint(150, 300)
+        h = random.randint(100, 250)
+        color_verde = (random.randint(120, 160), random.randint(170, 200), random.randint(120, 160))
+        pygame.draw.rect(pantalla, color_verde, (px - cam_x, py - cam_y, w, h))
+
+    # --- Calles principales ---
     for i in range(0, MAPA_ANCHO, 200):
-        pygame.draw.rect(pantalla, ASFALTO, (i - cam_x, 0 - cam_y, 80, MAPA_ALTO))
-        for k in range(0, MAPA_ALTO, 40):
-            pygame.draw.line(pantalla, ASFALTO_CLARO, (i - cam_x, k - cam_y), (i + 80 - cam_x, k - cam_y), 1)
+        # gradiente vertical en calles
+        for k in range(80):
+            color = (40 + k // 3, 40 + k // 3, 40 + k // 3)
+            pygame.draw.line(pantalla, color, (i - cam_x, 0 - cam_y + k), (i + 80 - cam_x, MAPA_ALTO - cam_y))
+        pygame.draw.rect(pantalla, (60, 60, 60), (i - cam_x, 0 - cam_y, 80, MAPA_ALTO))
+
+        # líneas blancas o amarillas en medio
+        for y in range(0, MAPA_ALTO, 60):
+            color_linea = (255, 255, 255) if i % 400 == 0 else (255, 220, 0)
+            pygame.draw.line(pantalla, color_linea, (i + 40 - cam_x, y - cam_y),
+                             (i + 40 - cam_x, y + 20 - cam_y), 2)
+
+    # --- Calles horizontales ---
     for j in range(0, MAPA_ALTO, 200):
-        pygame.draw.rect(pantalla, ASFALTO, (0 - cam_x, j - cam_y, MAPA_ANCHO, 80))
-        for k in range(0, MAPA_ANCHO, 40):
-            pygame.draw.line(pantalla, ASFALTO_CLARO, (k - cam_x, j - cam_y), (k - cam_x, j + 80 - cam_y), 1)
+        for k in range(80):
+            color = (45 + k // 3, 45 + k // 3, 45 + k // 3)
+            pygame.draw.line(pantalla, color, (0 - cam_x, j - cam_y + k), (MAPA_ANCHO - cam_x, j - cam_y + k))
+        pygame.draw.rect(pantalla, (65, 65, 65), (0 - cam_x, j - cam_y, MAPA_ANCHO, 80))
+
+        # líneas amarillas centrales
+        for x in range(0, MAPA_ANCHO, 60):
+            pygame.draw.line(pantalla, (255, 220, 0), (x - cam_x, j + 40 - cam_y),
+                             (x + 20 - cam_x, j + 40 - cam_y), 2)
+
+    # --- Aceras (bordes de calles más claros) ---
+    for i in range(0, MAPA_ANCHO, 200):
+        pygame.draw.rect(pantalla, (120, 120, 120), (i - cam_x - 8, 0 - cam_y, 8, MAPA_ALTO))
+        pygame.draw.rect(pantalla, (120, 120, 120), (i + 80 - cam_x, 0 - cam_y, 8, MAPA_ALTO))
+    for j in range(0, MAPA_ALTO, 200):
+        pygame.draw.rect(pantalla, (130, 130, 130), (0 - cam_x, j - cam_y - 8, MAPA_ANCHO, 8))
+        pygame.draw.rect(pantalla, (130, 130, 130), (0 - cam_x, j + 80 - cam_y, MAPA_ANCHO, 8))
+
+    # --- Edificios (bloques oscuros) ---
     for i in range(100, MAPA_ANCHO, 200):
         for j in range(100, MAPA_ALTO, 200):
             rect = pygame.Rect(i, j, 60, 60)
             colisiones.append(rect)
-            pygame.draw.ellipse(pantalla, (20,20,20), (i - cam_x + 6, j - cam_y + 6, 60, 14))
-            pygame.draw.rect(pantalla, EDIFICIO, (i - cam_x, j - cam_y, 60, 60), border_radius=4)
-            for wx in range(i + 6, i + 60 - 6, 18):
-                for wy in range(j + 8, j + 60 - 8, 18):
-                    pygame.draw.rect(pantalla, (110, 110, 130), (wx - cam_x, wy - cam_y, 8, 8))
+
+            # sombra sutil debajo
+            pygame.draw.ellipse(pantalla, (30, 30, 30), (i - cam_x + 6, j - cam_y + 6, 60, 14))
+            color_base = (70, 70, 90)
+            color_techo = (90, 90, 120)
+            # gradiente vertical en el edificio
+            for y in range(60):
+                r = int(color_base[0] + (color_techo[0] - color_base[0]) * (y / 60))
+                g = int(color_base[1] + (color_techo[1] - color_base[1]) * (y / 60))
+                b = int(color_base[2] + (color_techo[2] - color_base[2]) * (y / 60))
+                pygame.draw.line(pantalla, (r, g, b), (i - cam_x, j - cam_y + y), (i + 60 - cam_x, j - cam_y + y))
+
+            pygame.draw.rect(pantalla, (40, 40, 60), (i - cam_x, j - cam_y, 60, 60), 2, border_radius=3)
+
 
 def generar_casas(num, colisiones):
     casas = []
     esquinas_edificios = []
+    # importante: colisiones debe estar previamente poblada (dibujar_fondo se invocó antes)
     for rect in colisiones:
         esquinas_edificios.extend([
             (rect.left - 12, rect.top - 12),
@@ -150,7 +255,8 @@ def generar_casas(num, colisiones):
         ])
     for i in range(1, num + 1):
         intentos = 0
-        while intentos < 300:
+        # Elegimos esquinas de edificios para posicionar casas
+        while intentos < 300 and esquinas_edificios:
             x, y = random.choice(esquinas_edificios)
             casa_rect = pygame.Rect(x - 12, y - 12, 24, 24)
             col_ok = not any(casa_rect.colliderect(c) for c in colisiones)
@@ -160,10 +266,11 @@ def generar_casas(num, colisiones):
                 casas.append(Casa(x, y, i))
                 break
             intentos += 1
-        if intentos >= 300:
+        if intentos >= 300 or not esquinas_edificios:
             casas.append(Casa(100 + i * 60, 100 + i * 60, i))
     return casas
 
+# initialize map and casas (populate colisiones first)
 dibujar_fondo(pantalla, 0, 0, colisiones)
 casas = generar_casas(5, colisiones)
 
@@ -275,7 +382,7 @@ while ejecutando:
                 repartidor.entregando = True
                 repartidor.tiene_pizza = True
                 tiempo_inicio = time.time()
-                tiempo_limite = 45.0
+                tiempo_limite = 20.0
                 mensaje = f"Entrega la pizza a la Casa #{casa_objetivo.id}"
             else:
                 mensaje = "No hay pedidos pendientes. ¡Buen trabajo!"
@@ -293,7 +400,8 @@ while ejecutando:
                 repartidor.entregando = False
                 repartidor.tiene_pizza = False
                 mensaje = f"Pizza entregada en Casa #{casa_objetivo.id}! Vuelve a la pizzería."
-                sonido_entrega.play()
+                if sonido_entrega:
+                    sonido_entrega.play()
                 # mantenemos la casa_objetivo un breve momento para resaltarla
                 tiempo_restante = 3.0  # mostrar highlight por 3 segundos
 
