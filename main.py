@@ -1,3 +1,4 @@
+# (archivo completo: main.py)
 import pygame
 import sys
 import os
@@ -130,10 +131,13 @@ class Repartidor:
                 pygame.draw.rect(pantalla, BLANCO, (self.x - 5 - cam_x, self.y - 25 - cam_y, 10, 10))
 
 class Casa:
-    def __init__(self, x, y, id_casa):
+    def __init__(self, x, y, id_casa, base_id=None):
         self.x = x
         self.y = y
+        # id_casa es el id mostrado (puede cambiar por rotaciones)
         self.id = id_casa
+        # base_id permanece fijo (1..N) y se usa para decidir el bloque a rotar
+        self.base_id = base_id if base_id is not None else id_casa
         self.entregada = False
 
     def dibujar(self, pantalla, cam_x, cam_y, highlight=False):
@@ -263,16 +267,17 @@ def generar_casas(num, colisiones):
             lejos_de_pizza = math.hypot(x - pizzeria.x, y - pizzeria.y) > 200
             lejos_otras = all(math.hypot(x - cx, y - cy) > 80 for cx, cy in [(c.x, c.y) for c in casas])
             if col_ok and lejos_de_pizza and lejos_otras:
-                casas.append(Casa(x, y, i))
+                casas.append(Casa(x, y, i, base_id=i))
                 break
             intentos += 1
         if intentos >= 300 or not esquinas_edificios:
-            casas.append(Casa(100 + i * 60, 100 + i * 60, i))
+            casas.append(Casa(100 + i * 60, 100 + i * 60, i, base_id=i))
     return casas
 
 # initialize map and casas (populate colisiones first)
 dibujar_fondo(pantalla, 0, 0, colisiones)
-casas = generar_casas(5, colisiones)
+# generamos 10 casas como pediste
+casas = generar_casas(10, colisiones)
 
 # --- FEROMONAS ---
 nodos = list(range(len(casas) + 1))
@@ -327,6 +332,92 @@ def dibujar_minimapa(pantalla, pizzeria, casas, repartidor):
     ry = int(y0 + repartidor.y * escala_y)
     pygame.draw.rect(pantalla, ROJO, (rx-2, ry-2, 4, 4))
 
+# --- NUEVO: función para construir ruta siguiendo feromonas (greedy) ---
+def construir_ruta_de_feromonas(origen_idx, destino_idx, feromonas, posiciones):
+    """
+    Construye una ruta (lista de puntos (x,y)) desde origen_idx hasta destino_idx
+    siguiendo de forma greedy las feromonas. Si no hay feromonas útiles, va directo.
+    """
+    total = len(feromonas)
+    current = origen_idx
+    visited = set([current])
+    ruta = [posiciones[current]]
+    pasos = 0
+    max_pasos = total + 10
+    while current != destino_idx and pasos < max_pasos:
+        pasos += 1
+        candidatos = []
+        for j in range(total):
+            if j in visited:
+                continue
+            candidatos.append((j, feromonas[current][j]))
+        if not candidatos:
+            # sin candidatos, ir directo al destino
+            ruta.append(posiciones[destino_idx])
+            break
+        # elegir vecino con más feromona
+        j_max, val_max = max(candidatos, key=lambda x: x[1])
+        if val_max <= 0.0:
+            ruta.append(posiciones[destino_idx])
+            break
+        ruta.append(posiciones[j_max])
+        visited.add(j_max)
+        current = j_max
+    if ruta[-1] != posiciones[destino_idx]:
+        ruta.append(posiciones[destino_idx])
+    return ruta
+
+# --- NUEVO: Clase PizzeroAuto (sale de la pizzería y sigue la ruta) ---
+class PizzeroAuto:
+    def __init__(self, ruta_puntos, velocidad=3.5):
+        # ruta_puntos: lista de (x,y) coordenadas absolutas
+        self.ruta = [(float(x), float(y)) for (x, y) in ruta_puntos]
+        # posición inicial en la pizzería (primer punto de ruta)
+        self.x, self.y = self.ruta[0]
+        self.indice = 1  # siguiente punto objetivo en ruta
+        self.vel = velocidad
+        self.vivo = True
+        self.tiene_pizza = True
+
+    def update(self):
+        if not self.vivo:
+            return
+        if self.indice >= len(self.ruta):
+            self.vivo = False
+            self.tiene_pizza = False
+            return
+        tx, ty = self.ruta[self.indice]
+        dx = tx - self.x
+        dy = ty - self.y
+        dist = math.hypot(dx, dy)
+        if dist < 2.5:
+            self.indice += 1
+            if self.indice >= len(self.ruta):
+                self.vivo = False
+                self.tiene_pizza = False
+            return
+        # moverse hacia el objetivo
+        self.x += (dx / dist) * self.vel
+        self.y += (dy / dist) * self.vel
+
+    def dibujar(self, pantalla, cam_x, cam_y):
+        if not self.vivo:
+            return
+        if pizzero_img:
+            w, h = pizzero_img.get_width(), pizzero_img.get_height()
+            pantalla.blit(pizzero_img, (self.x - w//2 - cam_x, self.y - h//2 - cam_y))
+        else:
+            pygame.draw.rect(pantalla, ROJO, (self.x - 10 - cam_x, self.y - 10 - cam_y, 20, 20))
+        if self.tiene_pizza:
+            if pizza_img:
+                pw, ph = pizza_img.get_width(), pizza_img.get_height()
+                pantalla.blit(pizza_img, (self.x - pw//2 - cam_x, self.y - ph//2 - 8 - cam_y))
+            else:
+                pygame.draw.rect(pantalla, BLANCO, (self.x - 5 - cam_x, self.y - 25 - cam_y, 10, 10))
+
+# lista global de pizzeros automáticos
+pizzeros_auto = []
+
 # --- VARIABLES ---
 desplazamiento_flechas = 0
 mensaje = "Recoge una pizza en la pizzería 🍕"
@@ -334,6 +425,28 @@ casa_objetivo = None
 tiempo_inicio = 0.0
 tiempo_limite = 0.0
 tiempo_restante = 0.0
+
+# --- NUEVO: contadores para rotación por bloque de 5 (se usa base_id para decidir bloque) ---
+# deliveries_in_block[block_start_base] = contador de entregas en ese bloque
+deliveries_in_block = {}  # ejemplo keys serán 1,6 para bloques 1-5 y 6-10
+# inicializa contadores en base a base_ids presentes
+for c in casas:
+    block_start = ((c.base_id - 1) // 5) * 5 + 1
+    deliveries_in_block.setdefault(block_start, 0)
+
+def rotate_block_by_base_start(block_start):
+    """
+    Rota los IDs de las casas cuyo base_id pertenece al bloque que comienza en block_start.
+    Suma +10 al id mostrado y realiza wrap modulo 20 para que el ciclo sea repetible.
+    Además marca entregada=False para que vuelvan a estar activas.
+    """
+    for c in casas:
+        base_block = ((c.base_id - 1) // 5) * 5 + 1
+        if base_block == block_start:
+            # sumar 10 con wrap entre 1..20
+            new_id = ((c.id + 10 - 1) % 20) + 1
+            c.id = new_id
+            c.entregada = False
 
 # --- BUCLE PRINCIPAL ---
 ejecutando = True
@@ -378,7 +491,8 @@ while ejecutando:
         if math.hypot(repartidor.x - pizzeria.x, repartidor.y - pizzeria.y) < 30:
             pendientes = [c for c in casas if not c.entregada]
             if pendientes:
-                casa_objetivo = random.choice(pendientes)
+                pendientes_ordenadas = sorted(pendientes, key=lambda c: c.id)
+                casa_objetivo = pendientes_ordenadas[0]
                 repartidor.entregando = True
                 repartidor.tiene_pizza = True
                 tiempo_inicio = time.time()
@@ -396,14 +510,90 @@ while ejecutando:
             casa_objetivo = None
         else:
             if casa_objetivo and math.hypot(repartidor.x - casa_objetivo.x, repartidor.y - casa_objetivo.y) < 25:
+                # entrega del jugador
                 casa_objetivo.entregada = True
                 repartidor.entregando = False
                 repartidor.tiene_pizza = False
                 mensaje = f"Pizza entregada en Casa #{casa_objetivo.id}! Vuelve a la pizzería."
                 if sonido_entrega:
-                    sonido_entrega.play()
+                    try:
+                        sonido_entrega.play()
+                    except Exception:
+                        pass
+
+                # --- ACTUALIZAR CONTADOR DE ENTREGAS POR BLOQUE (usando base_id) ---
+                base = casa_objetivo.base_id
+                block_start = ((base - 1) // 5) * 5 + 1
+
+                # si alcanzamos 5 entregas en ese bloque base, rotamos ese bloque
+                if deliveries_in_block[block_start] == 5:
+                    casa_entregada = casa_objetivo
+                    try:
+                        rotate_block_by_base_start(block_start)
+                    except Exception as e:
+                        print("Error rotando bloque:", e)
+                        deliveries_in_block[block_start] = 0
+                        casa_objetivo = casa_entregada
+                    
+                base = casa_objetivo.base_id
+                block_start = ((base - 1) // 5) * 5 + 1
+                deliveries_in_block.setdefault(block_start, 0)
+                deliveries_in_block[block_start] += 1
+
+                # si alcanzamos 5 entregas en ese bloque base, rotamos ese bloque
+                if deliveries_in_block[block_start] >= 5:
+                    try:
+                        rotate_block_by_base_start(block_start)
+                        deliveries_in_block[block_start] = 0
+                    except Exception:
+                        # no romper el loop por error en rotación
+                        pass
+                    # resetear contador para ese bloque (permite repetir el ciclo)
+                    deliveries_in_block[block_start] = 0
+
+                # --- CREAR PIZZERO AUTOMÁTICO (sale desde la pizzería hacia la casa entregada,
+                # siguiendo la ruta construida por feromonas si existe) ---
+                try:
+                    # reconstruir posiciones/nodos por si cambiaron
+                    nodos = list(range(len(casas) + 1))
+                    posiciones = [(pizzeria.x, pizzeria.y)] + [(c.x, c.y) for c in casas]
+
+                    destino_idx = None
+                    # encontrar índice del nodo que coincide con la casa entregada (por coordenadas)
+                    for idx, pos in enumerate(posiciones):
+                        if idx == 0:
+                            continue
+                        if pos[0] == casa_objetivo.x and pos[1] == casa_objetivo.y:
+                            destino_idx = idx
+                            break
+                    if destino_idx is None:
+                        # fallback: ruta directa pizzeria -> casa
+                        ruta_directa = [(pizzeria.x, pizzeria.y), (casa_objetivo.x, casa_objetivo.y)]
+                        pizzeros_auto.append(PizzeroAuto(ruta_directa, velocidad=3.5))
+                    else:
+                        ruta = construir_ruta_de_feromonas(0, destino_idx, feromonas, posiciones)
+                        # si la ruta es corta o vacía, forzar ruta directa
+                        if not ruta or len(ruta) < 2:
+                            ruta = [(pizzeria.x, pizzeria.y), (casa_objetivo.x, casa_objetivo.y)]
+                        pizzeros_auto.append(PizzeroAuto(ruta, velocidad=3.5))
+                except Exception:
+                    # Siempre evitar romper el loop por errores en creación de automáticos
+                    try:
+                        pizzeros_auto.append(PizzeroAuto([(pizzeria.x, pizzeria.y), (casa_objetivo.x, casa_objetivo.y)], velocidad=3.5))
+                    except Exception:
+                        pass
+
                 # mantenemos la casa_objetivo un breve momento para resaltarla
                 tiempo_restante = 3.0  # mostrar highlight por 3 segundos
+
+    # --- ACTUALIZAR PIZZEROS AUTOMÁTICOS ---
+    for pa in list(pizzeros_auto):
+        pa.update()
+        if not pa.vivo:
+            try:
+                pizzeros_auto.remove(pa)
+            except ValueError:
+                pass
 
     # --- DIBUJAR ENTIDADES Y HUD ---
     pendientes_existentes = any(not c.entregada for c in casas)
@@ -414,6 +604,10 @@ while ejecutando:
     for casa in casas:
         highlight = (casa is casa_objetivo and (repartidor.entregando or tiempo_restante > 0))
         casa.dibujar(pantalla, cam_x, cam_y, highlight=highlight)
+
+    # dibujar pizzeros automáticos (si los hay)
+    for pa in pizzeros_auto:
+        pa.dibujar(pantalla, cam_x, cam_y)
 
     repartidor.dibujar(pantalla, cam_x, cam_y)
     dibujar_minimapa(pantalla, pizzeria, casas, repartidor)

@@ -18,11 +18,20 @@ class Hormiga:
         # Probabilidad de elegir cada nodo según feromonas y distancia
         probabilidades = []
         for nodo in no_visitados:
+            # proteger división por cero
+            d = self.distancias[nodo_actual][nodo]
+            if d == 0:
+                eta = 0.0
+            else:
+                eta = (1.0 / d) ** beta
             tau = feromonas[nodo_actual][nodo] ** alpha
-            eta = (1 / self.distancias[nodo_actual][nodo]) ** beta
             probabilidades.append(tau * eta)
 
         total = sum(probabilidades)
+        if total == 0:
+            # si todas las probabilidades son cero, elegir aleatorio uniforme
+            return random.choice(no_visitados)
+
         probabilidades = [p / total for p in probabilidades]
 
         # Elegir el próximo nodo según las probabilidades
@@ -84,7 +93,11 @@ class AlgoritmoHormigas:
 
         # Depósito de feromonas según calidad del recorrido
         for hormiga in hormigas:
+            # proteger contra recorrido vacío o longitud cero
+            if hormiga.longitud_total <= 0:
+                continue
             for i in range(len(hormiga.recorrido) - 1):
                 a, b = hormiga.recorrido[i], hormiga.recorrido[i + 1]
-                self.feromonas[a][b] += 1 / hormiga.longitud_total
-                self.feromonas[b][a] += 1 / hormiga.longitud_total  # simetría
+                deposit = 1.0 / hormiga.longitud_total
+                self.feromonas[a][b] += deposit
+                self.feromonas[b][a] += deposit  # simetría
